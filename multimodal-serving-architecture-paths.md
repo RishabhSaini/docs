@@ -44,8 +44,6 @@ pipeline:
   steps: [thinker, talker, code2wav]
 ```
 
-Unlike P/D disaggregation where the coordinator constructs [protocol-specific flags](https://github.com/llm-d/coordinator/blob/main/pkg/connectors/kv/nixlv2.go) (`do_remote_prefill`, `do_remote_decode`) because the same pod can operate in different modes per-request, standalone omni stages always know their role. The coordinator just forwards the transfer handle returned by each stage.
-
 For Qwen3-Omni the request flow would look like:
 
 ```
