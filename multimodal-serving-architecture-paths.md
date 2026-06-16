@@ -2,7 +2,7 @@
 
 ## Why This Matters
 
-Any-to-any multimodal models run as multi-stage pipelines. [Qwen3-Omni](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/model_executor/models/qwen3_omni/pipeline.py) chains a thinker LLM (stage 0, autoregressive), a talker codec generator (stage 1, autoregressive), and an audio decoder (stage 2, single forward pass). vllm-omni supports [31 such pipelines](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/config/pipeline_registry.py) across TTS, omni-modal, and image generation.
+Any-to-any multimodal models run as multi-stage pipelines. [Qwen3-Omni](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/model_executor/models/qwen3_omni/pipeline.py) chains a thinker LLM, a talker codec generator, and an audio decoder. vllm-omni supports [31 such pipelines](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/config/pipeline_registry.py) across TTS, omni-modal, and image generation.
 
 These stages have different compute profiles. The thinker is memory-bandwidth bound (AR token generation); the decoder is compute-bound (single-pass waveform synthesis). Scaling the thinker to handle load also scales the decoder, wasting GPUs on a stage that isn't the bottleneck. Per-stage scaling, failure isolation, and intelligent routing require llm-d to manage stages independently.
 
@@ -20,9 +20,9 @@ audio_codes = output.multimodal_output["codes"]["audio"].to(torch.long)  # raw t
 
 Code2wav never sees this. It receives pre-transformed [`OmniTokensPrompt`](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/inputs/data.py) objects built by the orchestrator. No serialization contract exists between stages.
 
-**Transforms run outside the consuming stage.** The non-async path runs in the [orchestrator thread](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/engine/orchestrator.py#L1284). The async-chunk and full-payload paths run in the [upstream worker's connector mixin](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/worker/omni_connector_model_runner_mixin.py). Neither the producing stage nor the consuming stage owns the transform.
+**Transforms run outside the consuming stage.** They execute in the [orchestrator](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/engine/orchestrator.py#L1284) or the [upstream worker's connector mixin](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/worker/omni_connector_model_runner_mixin.py), not in the stage that consumes the data.
 
-**Async-chunk streaming spans both stages.** The orchestrator [pre-warms downstream stages](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/engine/orchestrator.py#L1329) with placeholder tokens before upstream finishes. The worker mixin manages frame accumulation and dynamic chunk sizing based on the downstream stage's `scheduler_max_num_seqs`. This cross-stage state reduces TTFP by [~92% on Qwen3-Omni](https://github.com/vllm-project/vllm-omni/blob/main/docs/design/feature/async_chunk.md) (6459ms to 523ms at concurrency 1).
+**Async-chunk streaming spans both stages.** The orchestrator [pre-warms downstream stages](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/engine/orchestrator.py#L1329) with placeholder tokens before upstream finishes. The worker mixin manages frame accumulation and dynamic chunk sizing based on the downstream stage's `scheduler_max_num_seqs`. This cross-stage state reduces TTFP by [~92% on Qwen3-Omni](https://github.com/vllm-project/vllm-omni/blob/main/docs/design/feature/async_chunk.md).
 
 **Stages cannot boot independently.** Only the thinker (stage 0) owns the tokenizer ([`owns_tokenizer=True`](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/model_executor/models/qwen3_omni/pipeline.py#L29)). Talker and code2wav depend on the orchestrator for tokenized input, weight selection, and engine initialization.
 
@@ -57,7 +57,7 @@ Client POST /v1/audio/speech
   → Coordinator proxies audio to client
 ```
 
-The coordinator never parses stage output. It forwards handles the same way it forwards [KV transfer params in P/D disaggregation today](https://github.com/llm-d/coordinator/blob/main/pkg/steps/prefill.go). EPP role filters per stage type follow the existing [prefill/decode filter pattern](https://github.com/llm-d/llm-d-router/blob/main/pkg/epp/framework/plugins/scheduling/filter/bylabel/roles.go). Each stage gets its own scheduling profile with stage-appropriate scorers:
+EPP role filters per stage type follow the existing [prefill/decode filter pattern](https://github.com/llm-d/llm-d-router/blob/main/pkg/epp/framework/plugins/scheduling/filter/bylabel/roles.go). Each stage gets its own scheduling profile:
 
 ```yaml
 schedulingProfiles:
